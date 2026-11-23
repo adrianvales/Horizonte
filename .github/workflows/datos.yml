@@ -1,0 +1,62 @@
+name: Generar datos
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Región (galicia, asturias, pirineos, peninsula, canarias, espana)"
+        default: "espana"
+        required: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  generar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install numpy scipy rasterio requests
+
+      - name: Caché del relieve descargado
+        uses: actions/cache@v4
+        with:
+          path: datos/cache
+          key: dem-${{ inputs.region }}-v1
+          restore-keys: dem-
+
+      - name: Generar teselas
+        working-directory: datos
+        run: python generar_datos.py --region "${{ inputs.region }}" --out web --cache cache
+
+      - name: Comprobar
+        working-directory: datos
+        run: |
+          echo "Gruesas: $(ls web/c | wc -l)   Finas: $(ls web/f | wc -l)"
+          du -sh web
+          echo '<meta charset="utf-8"><p>Datos de Horizonte OK</p>' > web/index.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: datos/web
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
