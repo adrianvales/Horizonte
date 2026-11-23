@@ -51,7 +51,21 @@ REGIONS = {
 }
 DEM_URL = ("https://copernicus-dem-90m.s3.amazonaws.com/"
            "Copernicus_DSM_COG_30_{n}_00_{e}_00_DEM/Copernicus_DSM_COG_30_{n}_00_{e}_00_DEM.tif")
-OVERPASS = "https://overpass-api.de/api/interpreter"
+# Varios servidores de Overpass: si uno no responde (p. ej. bloquea los servidores de GitHub) se usa otro
+OVERPASS = [
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
+
+# Los servidores de GitHub no tienen IPv6: forzar IPv4 evita "Network is unreachable"
+try:
+    import urllib3.util.connection as _uc
+    _uc.HAS_IPV6 = False
+except Exception:
+    pass
+OVERPASS_FALLOS = 0
 PEAKS_PER_TILE = 150
 ISOLATION_MAX_KM = 10.0
 
@@ -144,9 +158,13 @@ def fetch_peaks(la, lo, cache):
   node["natural"="volcano"]["name"]({s},{w},{n},{e});
 );
 out body;"""
-    for intento in range(6):
+    global OVERPASS, OVERPASS_FALLOS
+    if OVERPASS_FALLOS >= 2:
+        return []   # ningún servidor responde: no perder más tiempo
+    for intento in range(2 * len(OVERPASS)):
+        url = OVERPASS[0]
         try:
-            r = requests.post(OVERPASS, data={"data": q}, timeout=240,
+            r = requests.post(url, data={"data": q}, timeout=(15, 240),
                               headers={"User-Agent": "Horizonte-CIQ-datagen/1.0"})
             if r.status_code in (429, 504):
                 raise requests.RequestException(f"HTTP {r.status_code}")
@@ -162,10 +180,13 @@ out body;"""
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(out, f, ensure_ascii=False)
             time.sleep(1.0)
+            OVERPASS_FALLOS = 0
             return out
         except (requests.RequestException, ValueError) as ex:
-            print(f"   Overpass reintento {intento + 1} ({la},{lo}): {ex}")
-            time.sleep(10 * (intento + 1))
+            print(f"   Overpass falló ({url.split('/')[2]}): {str(ex)[:120]}")
+            OVERPASS = OVERPASS[1:] + OVERPASS[:1]   # probar el siguiente servidor
+            time.sleep(3)
+    OVERPASS_FALLOS += 1
     print(f"   AVISO: sin cumbres para la celda {la},{lo}")
     return []
 
