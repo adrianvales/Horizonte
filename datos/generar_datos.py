@@ -16,10 +16,10 @@ Las teselas que son todo mar no se escriben (el reloj interpreta 404 = mar = 0 m
 
 Fuentes:
   - Relieve: Copernicus DEM GLO-90 (bucket público de AWS, sin registro)
-  - Cumbres: OpenStreetMap vía Overpass API (natural=peak / volcano con nombre)
+  - Cumbres: OpenStreetMap, extractos de Geofabrik (natural=peak / volcano con nombre)
 
 Uso:
-  pip install numpy scipy rasterio requests
+  pip install numpy scipy rasterio requests osmium
   python generar_datos.py --region galicia      # prueba rápida
   python generar_datos.py --region espana       # península + Baleares + Canarias (+ bordes de PT/FR/AND)
 """
@@ -65,6 +65,16 @@ try:
     _uc.HAS_IPV6 = False
 except Exception:
     pass
+# Extractos de OpenStreetMap (Geofabrik) de los que se sacan las cumbres
+GEOFABRIK = "https://download.geofabrik.de/{}-latest.osm.pbf"
+PBFS = {
+    "galicia": ["europe/spain/galicia", "europe/portugal"],
+    "asturias": ["europe/spain"],
+    "pirineos": ["europe/spain", "europe/andorra"],
+    "peninsula": ["europe/spain", "europe/portugal", "europe/andorra"],
+    "canarias": ["africa/canary-islands"],
+    "espana": ["europe/spain", "europe/portugal", "europe/andorra", "africa/canary-islands"],
+}
 OVERPASS_FALLOS = 0
 PEAKS_PER_TILE = 150
 ISOLATION_MAX_KM = 10.0
@@ -191,6 +201,52 @@ out body;"""
     return []
 
 
+def download_file(url, path):
+    if os.path.exists(path):
+        return path
+    print(f"   descargando {url}")
+    for intento in range(4):
+        try:
+            with requests.get(url, stream=True, timeout=(15, 120)) as r:
+                r.raise_for_status()
+                with open(path + ".tmp", "wb") as f:
+                    for chunk in r.iter_content(1 << 20):
+                        f.write(chunk)
+            os.replace(path + ".tmp", path)
+            return path
+        except requests.RequestException as ex:
+            print(f"   reintento {intento + 1}: {ex}")
+            time.sleep(10 * (intento + 1))
+    raise RuntimeError(f"No se pudo descargar {url}")
+
+
+def peaks_from_pbf(region, cache, cells):
+    """Cumbres con nombre de los extractos de Geofabrik, agrupadas por celda de 1 grado."""
+    import osmium
+    cellset = set(cells)
+    by_cell = {}
+    seen = set()
+    for name in PBFS[region]:
+        path = download_file(GEOFABRIK.format(name), os.path.join(cache, name.replace("/", "_") + ".osm.pbf"))
+        print(f"   leyendo cumbres de {os.path.basename(path)}")
+        fp = osmium.FileProcessor(path, osmium.osm.NODE).with_filter(
+            osmium.filter.TagFilter(("natural", "peak"), ("natural", "volcano")))
+        n = 0
+        for node in fp:
+            nm = node.tags.get("name")
+            if not nm or node.id in seen:
+                continue
+            seen.add(node.id)
+            lat, lon = node.location.lat, node.location.lon
+            key = (math.floor(lat), math.floor(lon))
+            if key not in cellset:
+                continue
+            by_cell.setdefault(key, []).append([nm.strip(), lat, lon, parse_ele(node.tags.get("ele"))])
+            n += 1
+        print(f"   {n} cumbres con nombre")
+    return by_cell
+
+
 def parse_ele(s):
     if not s:
         return None
@@ -232,7 +288,9 @@ def main():
     ap.add_argument("--region", default="galicia", choices=REGIONS.keys())
     ap.add_argument("--out", default="web")
     ap.add_argument("--cache", default="cache")
-    ap.add_argument("--sin-cumbres", action="store_true", help="no consultar Overpass")
+    ap.add_argument("--sin-cumbres", action="store_true", help="no sacar cumbres")
+    ap.add_argument("--cumbres", default="geofabrik", choices=["geofabrik", "overpass"],
+                    help="de dónde sacar las cumbres (geofabrik = descarga directa, recomendado)")
     ap.add_argument("--margen", type=float, default=0.5, help="grados extra alrededor de la región")
     args = ap.parse_args()
 
@@ -251,6 +309,10 @@ def main():
                 cells.add((la, lo))
     cells = sorted(cells)
     print(f"{len(cells)} celdas de 1x1 grado")
+
+    pbf_peaks = None
+    if not args.sin_cumbres and args.cumbres == "geofabrik":
+        pbf_peaks = peaks_from_pbf(args.region, args.cache, cells)
 
     coarse = {}        # (ti,tj) -> dict
     all_peaks = []     # [name, lat, lon, ele]
@@ -290,7 +352,7 @@ def main():
 
         # cumbres de la celda
         if not args.sin_cumbres:
-            pk = fetch_peaks(la, lo, args.cache)
+            pk = pbf_peaks.get((la, lo), []) if pbf_peaks is not None else fetch_peaks(la, lo, args.cache)
             for name, plat, plon, pele in pk:
                 if not (la <= plat < la + 1 and lo <= plon < lo + 1):
                     continue
