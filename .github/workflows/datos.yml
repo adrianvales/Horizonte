@@ -35,7 +35,7 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependencias
-        run: pip install numpy scipy rasterio requests
+        run: pip install numpy scipy rasterio requests osmium
 
       - name: Caché del relieve descargado
         uses: actions/cache@v4
